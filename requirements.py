@@ -1,0 +1,7 @@
+fastapi>=0.110.0
+uvicorn[standard]>=0.28.0
+requests>=2.31.0
+python-dotenv>=1.0.1
+pydantic>=2.6.0
+# psycopg2-binary>=2.9.9   # Descomenta si usas PostgreSQL
+# pymongo>=4.6.0          # Descomenta si usas MongoDB
