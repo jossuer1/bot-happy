@@ -1,7 +1,12 @@
 import os
+from dotenv import load_dotenv
+
+# Debe ir ANTES de importar app.messaging o app.db/app.catalog,
+# porque esos módulos leen os.getenv(...) apenas se importan.
+load_dotenv()
+
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import PlainTextResponse
-from dotenv import load_dotenv
 
 from app.messaging import send_text, send_buttons
 from app.catalog import (
@@ -10,8 +15,6 @@ from app.catalog import (
     get_products_by_category,
     get_product_by_id,
 )
-
-load_dotenv()
 
 app = FastAPI(title="WhatsApp Bot API")
 
@@ -138,7 +141,9 @@ async def receive_webhook(request: Request):
                             enviar_detalle_producto(from_number, product_id)
 
     except Exception as e:
+        import traceback
         print(f"Error procesando webhook: {e}")
+        traceback.print_exc()
 
     return {"status": "success"}
 

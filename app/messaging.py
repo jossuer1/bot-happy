@@ -20,7 +20,10 @@ def send_text(to_number: str, message_text: str):
         "text": {"preview_url": False, "body": message_text},
     }
     response = requests.post(GRAPH_URL, json=payload, headers=HEADERS)
-    return response.json()
+    data = response.json()
+    if response.status_code >= 400:
+        print(f"[Meta API error {response.status_code}] send_text: {data}")
+    return data
 
 
 def send_buttons(to_number: str, body_text: str, buttons: list):
@@ -48,4 +51,7 @@ def send_buttons(to_number: str, body_text: str, buttons: list):
         },
     }
     response = requests.post(GRAPH_URL, json=payload, headers=HEADERS)
-    return response.json()
+    data = response.json()
+    if response.status_code >= 400:
+        print(f"[Meta API error {response.status_code}] send_buttons: {data}")
+    return data
