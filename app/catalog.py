@@ -3,7 +3,6 @@ from app.db import categories_collection, products_collection
 
 
 def get_categories(limit: int = 3):
-    """Trae hasta `limit` categorías (WhatsApp permite máximo 3 botones por mensaje)."""
     return list(categories_collection.find().limit(limit))
 
 

@@ -1,24 +1,21 @@
+﻿import hashlib
+import hmac
+import json
+import logging
 import os
+
 from dotenv import load_dotenv
 
-# Debe ir ANTES de importar app.messaging o app.db/app.catalog,
-# porque esos módulos leen os.getenv(...) apenas se importan.
 load_dotenv()
 
-from fastapi import FastAPI, Request, HTTPException, Query
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
 
-from app.messaging import send_text, send_buttons
-from app.catalog import (
-    get_categories,
-    get_category_by_id,
-    get_products_by_category,
-    get_product_by_id,
-)
+from app.intake import process_message
 
-app = FastAPI(title="WhatsApp Bot API")
-
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
+app = FastAPI(title="Bot Happy - Ubicaciones y notas de voz")
+logger = logging.getLogger(__name__)
 
 
 @app.get("/")
@@ -26,131 +23,45 @@ def read_root():
     return {"status": "ok", "message": "Servidor de WhatsApp activo"}
 
 
-# ------------------------------------------------------------------
-# 1. VERIFICACIÓN DEL WEBHOOK (Meta envía una petición GET)
-# ------------------------------------------------------------------
 @app.get("/webhook")
 def verify_webhook(
     hub_mode: str = Query(None, alias="hub.mode"),
     hub_challenge: str = Query(None, alias="hub.challenge"),
     hub_verify_token: str = Query(None, alias="hub.verify_token"),
 ):
-    if hub_mode == "subscribe" and hub_verify_token == VERIFY_TOKEN:
-        print("Webhook verificado con éxito!")
-        return PlainTextResponse(content=hub_challenge, status_code=200)
-
-    raise HTTPException(status_code=403, detail="Token de verificación inválido")
-
-
-# ------------------------------------------------------------------
-# 2. LÓGICA DEL MENÚ / CATÁLOGO
-# ------------------------------------------------------------------
-def enviar_menu_categorias(from_number: str):
-    categorias = get_categories(limit=3)
-
-    if not categorias:
-        send_text(from_number, "Todavía no hay categorías cargadas en el catálogo.")
-        return
-
-    buttons = [
-        {"id": f"cat_{str(c['_id'])}", "title": c["name"]} for c in categorias
-    ]
-    send_buttons(from_number, "¡Hola! Elige una categoría para ver el catálogo:", buttons)
+    token = os.getenv("VERIFY_TOKEN")
+    if token and hub_mode == "subscribe" and hub_verify_token == token and hub_challenge:
+        return PlainTextResponse(hub_challenge)
+    raise HTTPException(status_code=403, detail="Verificación inválida")
 
 
-def enviar_productos_de_categoria(from_number: str, category_id: str):
-    categoria = get_category_by_id(category_id)
-    productos = get_products_by_category(category_id, limit=3)
-
-    if not productos:
-        send_text(from_number, "No hay productos en esta categoría todavía.")
-        return
-
-    nombre_categoria = categoria["name"] if categoria else "esta categoría"
-
-    # WhatsApp buttons no soportan descripción/precio en el botón,
-    # así que mandamos un resumen en texto y luego los botones para elegir.
-    resumen = f"Productos en *{nombre_categoria}*:\n\n"
-    for p in productos:
-        resumen += f"• {p['name']} - ${p.get('price', 'N/D')}\n"
-    send_text(from_number, resumen)
-
-    buttons = [
-        {"id": f"prod_{str(p['_id'])}", "title": p["name"]} for p in productos
-    ]
-    send_buttons(from_number, "Toca un producto para ver el detalle:", buttons)
-
-
-def enviar_detalle_producto(from_number: str, product_id: str):
-    producto = get_product_by_id(product_id)
-
-    if not producto:
-        send_text(from_number, "No encontré ese producto.")
-        return
-
-    detalle = (
-        f"*{producto['name']}*\n"
-        f"{producto.get('description', 'Sin descripción disponible.')}\n"
-        f"Precio: ${producto.get('price', 'N/D')}"
-    )
-    send_text(from_number, detalle)
-
-    buttons = [{"id": "menu", "title": "Ver menú"}]
-    send_buttons(from_number, "¿Quieres ver otra categoría?", buttons)
-
-
-# ------------------------------------------------------------------
-# 3. RECEPCIÓN DE MENSAJES (Meta envía una petición POST)
-# ------------------------------------------------------------------
 @app.post("/webhook")
 async def receive_webhook(request: Request):
-    data = await request.json()
-    print("Payload recibido:", data)
-
+    secret = os.getenv("WHATSAPP_APP_SECRET")
+    if not secret:
+        raise HTTPException(status_code=503, detail="Falta configurar WHATSAPP_APP_SECRET")
+    body = await request.body()
+    expected = "sha256=" + hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(request.headers.get("x-hub-signature-256", ""), expected):
+        raise HTTPException(status_code=403, detail="Firma inválida")
     try:
-        entries = data.get("entry", [])
-        for entry in entries:
-            changes = entry.get("changes", [])
-            for change in changes:
-                value = change.get("value", {})
-                messages = value.get("messages", [])
+        data = json.loads(body)
+    except (ValueError, UnicodeDecodeError):
+        raise HTTPException(status_code=400, detail="JSON inválido")
+    if not isinstance(data, dict) or data.get("object") != "whatsapp_business_account":
+        raise HTTPException(status_code=400, detail="Evento de WhatsApp inválido")
 
-                if not messages:
-                    continue
-
-                msg = messages[0]
-                from_number = msg.get("from")
-                msg_type = msg.get("type")
-
-                if msg_type == "text":
-                    # Cualquier texto entrante muestra el menú de categorías
-                    enviar_menu_categorias(from_number)
-
-                elif msg_type == "interactive":
-                    interactive = msg.get("interactive", {})
-                    if interactive.get("type") == "button_reply":
-                        button_id = interactive["button_reply"]["id"]
-
-                        if button_id == "menu":
-                            enviar_menu_categorias(from_number)
-                        elif button_id.startswith("cat_"):
-                            category_id = button_id.replace("cat_", "", 1)
-                            enviar_productos_de_categoria(from_number, category_id)
-                        elif button_id.startswith("prod_"):
-                            product_id = button_id.replace("prod_", "", 1)
-                            enviar_detalle_producto(from_number, product_id)
-
-    except Exception as e:
-        import traceback
-        print(f"Error procesando webhook: {e}")
-        traceback.print_exc()
-
+    failed = False
+    for entry in data.get("entry", []):
+        for change in entry.get("changes", []):
+            value = change.get("value", {})
+            for message in value.get("messages", []):
+                try:
+                    await run_in_threadpool(process_message, message)
+                except Exception:
+                    # No registrar teléfonos, ubicaciones, audio ni transcripciones.
+                    logger.error("No se pudo procesar un mensaje de WhatsApp")
+                    failed = True
+    if failed:
+        raise HTTPException(status_code=503, detail="No se procesaron todos los mensajes; reintentar")
     return {"status": "success"}
-
-
-# ------------------------------------------------------------------
-# 4. FUNCIÓN PARA ENVIAR MENSAJES (uso manual / pruebas)
-# ------------------------------------------------------------------
-@app.post("/send-message")
-def send_whatsapp_message(to_number: str, message_text: str):
-    return send_text(to_number, message_text)

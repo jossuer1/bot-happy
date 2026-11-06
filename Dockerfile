@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Instalar dependencias del sistema necesarias
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
+    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar e instalar dependencias de Python
