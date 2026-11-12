@@ -13,7 +13,7 @@ class TranscriptionTests(unittest.TestCase):
         self.response = Mock(status_code=200)
         self.response.json.return_value = {"text": " Necesito ayuda. "}
         self.patches = [
-            patch.dict("os.environ", {"OPENAI_API_KEY": "test-key", "OPENAI_TRANSCRIPTION_MODEL": "test-model"}),
+            patch.dict("os.environ", {"GROQ_API_KEY": "test-key", "GROQ_TRANSCRIPTION_MODEL": "test-model"}),
             patch.object(transcription, "download_audio", side_effect=self.download),
             patch.object(transcription.subprocess, "run", side_effect=self.convert),
             patch.object(transcription.requests, "post", return_value=self.response),
@@ -33,8 +33,8 @@ class TranscriptionTests(unittest.TestCase):
 
     def test_transcribes_via_api_and_removes_temporary_audio(self):
         self.assertEqual(transcription.transcribe_audio("123"), "Necesito ayuda.")
-        self.assertEqual(self.post.call_args.args[0], "https://api.openai.com/v1/audio/transcriptions")
-        self.assertEqual(self.post.call_args.kwargs["data"], {"model": "test-model"})
+        self.assertEqual(self.post.call_args.args[0], "https://api.groq.com/openai/v1/audio/transcriptions")
+        self.assertEqual(self.post.call_args.kwargs["data"], {"model": "test-model", "language": "es", "response_format": "json"})
         self.assertEqual(self.post.call_args.kwargs["headers"]["Authorization"], "Bearer test-key")
         self.assertTrue(all(not path.exists() for path in self.paths))
 
@@ -58,8 +58,33 @@ class TranscriptionTests(unittest.TestCase):
             transcription.transcribe_audio("123")
         self.assertTrue(all(not path.exists() for path in self.paths))
 
+    def test_invalid_key_stops_retries_and_cleans_audio(self):
+        self.response.status_code = 401
+        self.response.json.return_value = {"error": {"code": "invalid_api_key"}}
+        with self.assertRaises(AudioInputError):
+            transcription.transcribe_audio("123")
+        self.assertTrue(all(not path.exists() for path in self.paths))
+
+    def test_rate_limit_remains_retryable(self):
+        self.response.status_code = 429
+        self.response.json.return_value = {"error": {"code": "rate_limit_exceeded"}}
+        self.response.raise_for_status.side_effect = transcription.requests.HTTPError()
+        with self.assertRaises(transcription.requests.HTTPError):
+            transcription.transcribe_audio("123")
+
+    def test_error_log_does_not_expose_response_message(self):
+        self.response.status_code = 401
+        self.response.json.return_value = {
+            "error": {"code": "invalid_api_key", "message": "private-secret"}
+        }
+        with self.assertLogs(transcription.logger, level="ERROR") as logs:
+            with self.assertRaises(AudioInputError):
+                transcription.transcribe_audio("123")
+        self.assertIn("invalid_api_key", " ".join(logs.output))
+        self.assertNotIn("private-secret", " ".join(logs.output))
+
     def test_missing_key_does_not_download_or_call_api(self):
-        with patch.dict("os.environ", {"OPENAI_API_KEY": ""}):
+        with patch.dict("os.environ", {"GROQ_API_KEY": ""}):
             with self.assertRaises(AudioInputError):
                 transcription.transcribe_audio("123")
         self.download_mock.assert_not_called()

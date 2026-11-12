@@ -8,7 +8,7 @@ El catálogo anterior deja de ser el flujo activo; sus colecciones no se borran 
 1. Envía hola (o cualquier texto) al número del bot.
 2. El bot pide tu ubicación mediante el botón de WhatsApp. También puedes usar Adjuntar > Ubicación.
 3. Al compartirla, guarda latitud, longitud, nombre/dirección si WhatsApp los incluye y un enlace de Google Maps.
-4. Envía una nota de voz. Se descarga temporalmente, se convierte a MP3 con FFmpeg y se envía a la API de OpenAI para transcribirla. Solo el texto se guarda en MongoDB; los archivos temporales se eliminan incluso si hay errores. La conservación de datos en el proveedor depende de sus políticas.
+4. Envía una nota de voz. Se descarga temporalmente, se convierte a MP3 con FFmpeg y se envía a la API de Groq para transcribirla. Solo el texto se guarda en MongoDB; los archivos temporales se eliminan incluso si hay errores. La conservación de datos en el proveedor depende de sus políticas.
 5. Las fotos y videos reciben un aviso de que el almacenamiento todavía no está habilitado. No se descargan ni guardan sus archivos. Cloudinary queda pendiente.
 
 No necesitas enviar la ubicación antes de un audio: ambos se guardan de forma independiente y se relacionan por from_number. Aún no existe agrupación por caso o reporte, ni panel para consultar datos.
@@ -22,11 +22,11 @@ Copia .env.example a .env solo si no tienes uno y completa:
 - WHATSAPP_APP_SECRET: secreto de la aplicación de Meta para verificar la firma de cada POST. Es diferente del token de verificación.
 - WHATSAPP_API_VERSION: versión habilitada en tu aplicación de Meta.
 - MONGODB_URI y MONGODB_DB_NAME: base de datos existente o nueva.
-- OPENAI_API_KEY: clave de API de OpenAI con acceso al modelo y saldo disponible. Se obtiene en https://platform.openai.com/api-keys y se configura en Render > Environment.
-- OPENAI_TRANSCRIPTION_MODEL: gpt-transcribe por defecto. Solo necesitas agregar esta variable si quieres usar otro modelo compatible con tu cuenta.
+- GROQ_API_KEY: clave de API de Groq con acceso al modelo. Se obtiene en https://console.groq.com/keys y se configura en Render > Environment.
+- GROQ_TRANSCRIPTION_MODEL: whisper-large-v3-turbo por defecto. Solo necesitas agregar esta variable si quieres usar otro modelo compatible con tu cuenta.
 - FFMPEG_BINARY: ffmpeg por defecto. Docker lo instala automáticamente.
 
-Las antiguas variables WHISPER_* ya no se usan. La transcripción por API tiene costo por uso. El .env existente no se modifica automáticamente.
+Las antiguas variables WHISPER_* ya no se usan. Groq ofrece un plan gratuito con cuotas de solicitudes y duración de audio. Consulta los límites exactos en tu cuenta. El .env existente no se modifica automáticamente.
 
 No publiques .env ni pegues credenciales en el código. El .env existente no se modifica automáticamente.
 
@@ -67,14 +67,14 @@ Las pruebas unitarias usan dobles de MongoDB, Meta y la API de transcripción: n
 
 No ejecutes app.scripts.seed_catalog para este flujo: es una herramienta antigua que borra y reemplaza el catálogo.
 
-Referencias: [transcripción de OpenAI](https://developers.openai.com/api/docs/guides/speech-to-text), [descarga de medios de Meta](https://www.postman.com/meta/whatsapp-business-platform/request/zsq66eh/download-media).
+Referencias: [transcripción de Groq](https://console.groq.com/docs/speech-to-text), [descarga de medios de Meta](https://www.postman.com/meta/whatsapp-business-platform/request/zsq66eh/download-media).
 
 ## Render
 
 1. Despliega el código actualizado usando el Dockerfile para instalar FFmpeg y las dependencias ligeras.
-2. Conserva tus variables de WhatsApp y MongoDB y agrega OPENAI_API_KEY en Environment. OPENAI_TRANSCRIPTION_MODEL es opcional.
+2. Conserva tus variables de WhatsApp y MongoDB y agrega GROQ_API_KEY en Environment. GROQ_TRANSCRIPTION_MODEL es opcional.
 3. Puedes eliminar WHISPER_MODEL, WHISPER_CPU_THREADS y las demás WHISPER_*.
 4. Espera a que el despliegue esté activo y envía una nueva nota de voz corta.
-5. Los logs mostrarán la descarga, conversión y solicitud a la API. Un error HTTP 401 apunta a la clave o autorización; HTTP 429 puede indicar cuota, saldo o límite de solicitudes y requiere revisar la cuenta del proveedor.
+5. Los logs mostrarán la descarga, conversión y solicitud a la API. Un error HTTP 401 apunta a la clave o autorización; HTTP 429 indica un límite de uso y requiere revisar Limits en Groq y esperar antes de reintentar.
 
 Las pruebas automatizadas simulan la API. La prueba de extremo a extremo requiere una clave configurada y el servicio desplegado.

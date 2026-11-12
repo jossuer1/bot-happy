@@ -16,7 +16,7 @@ _audio_lock = Lock()
 
 
 def transcribe_audio(media_id: str):
-    key = os.getenv("OPENAI_API_KEY")
+    key = os.getenv("GROQ_API_KEY")
     if not key:
         raise AudioInputError("La transcripción aún no está configurada. Contacta al administrador para habilitarla.")
     with _audio_lock, TemporaryDirectory(prefix="bot-happy-audio-") as directory:
@@ -42,14 +42,36 @@ def transcribe_audio(media_id: str):
         logger.info("Solicitando transcripción a la API")
         with converted.open("rb") as audio:
             response = requests.post(
-                "https://api.openai.com/v1/audio/transcriptions",
+                "https://api.groq.com/openai/v1/audio/transcriptions",
                 headers={"Authorization": f"Bearer {key}"},
-                data={"model": os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-transcribe")},
+                data={
+                    "model": os.getenv("GROQ_TRANSCRIPTION_MODEL", "whisper-large-v3-turbo"),
+                    "language": "es",
+                    "response_format": "json",
+                },
                 files={"file": ("voice.mp3", audio, "audio/mpeg")},
                 timeout=(10, 120),
             )
         if response.status_code >= 400:
             logger.error("La API de transcripción respondió HTTP %s", response.status_code)
+            try:
+                payload = response.json()
+            except ValueError:
+                payload = {}
+            detail = payload.get("error", {}) if isinstance(payload, dict) else {}
+            if not isinstance(detail, dict):
+                detail = {}
+            code = detail.get("code")
+            # Registrar solo códigos conocidos, sin cuerpos de respuesta ni claves.
+            known_codes = {"rate_limit_exceeded", "invalid_api_key", "model_not_found"}
+            if isinstance(code, str) and code in known_codes:
+                logger.error("Código de la API de transcripción: %s", code)
+            if response.status_code in {401, 403}:
+                logger.error("Revisar GROQ_API_KEY y los permisos del modelo en Groq")
+                raise AudioInputError(
+                    "El servicio de transcripción está temporalmente inhabilitado. "
+                    "Contacta al administrador y vuelve a enviar el audio cuando esté habilitado."
+                )
         response.raise_for_status()
         text = response.json().get("text", "").strip()
         if not text:
