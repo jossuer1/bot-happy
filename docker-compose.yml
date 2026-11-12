@@ -9,10 +9,5 @@ services:
       - .env
     volumes:
       - .:/app
-      - whisper_models:/models
     environment:
       - PORT=8000
-      - WHISPER_DOWNLOAD_ROOT=/models
-
-volumes:
-  whisper_models:

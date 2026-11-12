@@ -1,61 +1,58 @@
-﻿import os
-from functools import lru_cache
+﻿import logging
+import os
 from pathlib import Path
+import subprocess
 from tempfile import TemporaryDirectory
 from threading import Lock
+
+import requests
 
 from app.messaging import AudioInputError, download_audio
 
 MAX_AUDIO_BYTES = 20 * 1024 * 1024
-# Un modelo por proceso y una transcripción a la vez para limitar memoria en CPU.
-_transcription_lock = Lock()
-
-
-@lru_cache(maxsize=1)
-def get_model():
-    from faster_whisper import WhisperModel
-
-    return WhisperModel(
-        os.getenv("WHISPER_MODEL", "small"),
-        device="cpu",
-        compute_type="int8",
-        download_root=os.getenv("WHISPER_DOWNLOAD_ROOT", "models"),
-        cpu_threads=int(os.getenv("WHISPER_CPU_THREADS", "4")),
-        local_files_only=os.getenv("WHISPER_LOCAL_FILES_ONLY", "false").lower() == "true",
-    )
-
-
-def decode_recording(path):
-    from av.error import FFmpegError
-    from faster_whisper.audio import decode_audio
-
-    try:
-        return decode_audio(str(path), sampling_rate=16000)
-    except (FFmpegError, ValueError, EOFError) as error:
-        raise AudioInputError("No pude leer ese audio. Envía otra nota de voz.") from error
+logger = logging.getLogger("uvicorn.error")
+# Limita conversiones y solicitudes simultáneas en servicios con poca RAM.
+_audio_lock = Lock()
 
 
 def transcribe_audio(media_id: str):
-    # Se borran los archivos temporales al terminar y ante cualquier error.
-    with TemporaryDirectory(prefix="bot-happy-audio-") as directory:
+    key = os.getenv("OPENAI_API_KEY")
+    if not key:
+        raise AudioInputError("La transcripción aún no está configurada. Contacta al administrador para habilitarla.")
+    with _audio_lock, TemporaryDirectory(prefix="bot-happy-audio-") as directory:
         source = Path(directory) / "source.audio"
+        converted = Path(directory) / "voice.mp3"
+        logger.info("Descargando audio de WhatsApp")
         download_audio(media_id, source, MAX_AUDIO_BYTES)
-        with _transcription_lock:
-            audio = decode_recording(source)
-            max_seconds = int(os.getenv("WHISPER_MAX_AUDIO_SECONDS", "300"))
-            if len(audio) > max_seconds * 16000:
-                raise AudioInputError(f"El audio es demasiado largo. Envía uno de hasta {max_seconds} segundos.")
-            language = os.getenv("WHISPER_LANGUAGE", "es")
-            segments, _ = get_model().transcribe(
-                audio,
-                language=None if language == "auto" else language,
-                beam_size=5,
-                vad_filter=True,
-                condition_on_previous_text=False,
+        logger.info("Convirtiendo audio para transcripción")
+        try:
+            subprocess.run(
+                [os.getenv("FFMPEG_BINARY", "ffmpeg"), "-nostdin", "-v", "error", "-y",
+                 "-threads", "1", "-protocol_whitelist", "file,pipe", "-i", str(source),
+                 "-vn", "-ac", "1", "-ar", "16000", "-b:a", "32k", "-threads", "1",
+                 "-fs", str(MAX_AUDIO_BYTES + 1), str(converted)],
+                check=True, capture_output=True, timeout=120,
             )
-            # faster-whisper genera segmentos de forma diferida: consumirlos antes
-            # de liberar el bloqueo y de eliminar el archivo temporal.
-            text = " ".join(segment.text.strip() for segment in segments).strip()
+        except subprocess.CalledProcessError as error:
+            raise AudioInputError("No pude leer ese audio. Envía otra nota de voz.") from error
+        if not converted.exists() or converted.stat().st_size == 0:
+            raise AudioInputError("El audio está vacío. Envía otra nota de voz.")
+        if converted.stat().st_size > MAX_AUDIO_BYTES:
+            raise AudioInputError("El audio es demasiado largo. Envía una nota de voz más corta.")
+        logger.info("Solicitando transcripción a la API")
+        with converted.open("rb") as audio:
+            response = requests.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {key}"},
+                data={"model": os.getenv("OPENAI_TRANSCRIPTION_MODEL", "gpt-transcribe")},
+                files={"file": ("voice.mp3", audio, "audio/mpeg")},
+                timeout=(10, 120),
+            )
+        if response.status_code >= 400:
+            logger.error("La API de transcripción respondió HTTP %s", response.status_code)
+        response.raise_for_status()
+        text = response.json().get("text", "").strip()
         if not text:
             raise AudioInputError("No pude identificar palabras en el audio. Envía otra nota de voz más clara.")
+        logger.info("Transcripción recibida; eliminando audio temporal")
         return text

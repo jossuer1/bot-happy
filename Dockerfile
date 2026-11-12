@@ -10,7 +10,7 @@ WORKDIR /app
 
 # Instalar dependencias del sistema necesarias
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libgomp1 \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 # Copiar e instalar dependencias de Python
