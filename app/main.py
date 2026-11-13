@@ -3,6 +3,7 @@ import hmac
 import json
 import logging
 import os
+from uuid import uuid4
 
 from dotenv import load_dotenv
 
@@ -13,6 +14,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import PlainTextResponse
 
 from app.intake import process_message
+from app.tracing import event, trace_id, message_id
 
 app = FastAPI(title="Bot Happy - Ubicaciones y notas de voz")
 logger = logging.getLogger(__name__)
@@ -51,17 +53,30 @@ async def receive_webhook(request: Request):
     if not isinstance(data, dict) or data.get("object") != "whatsapp_business_account":
         raise HTTPException(status_code=400, detail="Evento de WhatsApp inválido")
 
+    trace_token = trace_id.set(uuid4().hex)
+    try:
+        return await process_event(data)
+    finally:
+        trace_id.reset(trace_token)
+
+
+async def process_event(data):
+    event("webhook.received", payload=data)
     failed = False
     for entry in data.get("entry", []):
         for change in entry.get("changes", []):
             value = change.get("value", {})
             for message in value.get("messages", []):
+                message_token = message_id.set(message.get("id"))
                 try:
+                    event("message.processing", message_type=message.get("type"))
                     await run_in_threadpool(process_message, message)
-                except Exception:
-                    # No registrar teléfonos, ubicaciones, audio ni transcripciones.
-                    logger.error("No se pudo procesar un mensaje de WhatsApp")
+                except Exception as error:
+                    event("message.failed", error_type=type(error).__name__)
                     failed = True
+                finally:
+                    message_id.reset(message_token)
+    event("webhook.response", http_status=503 if failed else 200)
     if failed:
         raise HTTPException(status_code=503, detail="No se procesaron todos los mensajes; reintentar")
     return {"status": "success"}

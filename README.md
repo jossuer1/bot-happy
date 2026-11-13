@@ -1,4 +1,4 @@
-﻿# Bot Happy: ubicaciones y transcripciones de WhatsApp
+# Bot Happy: ubicaciones y transcripciones de WhatsApp
 
 FastAPI recibe webhooks de WhatsApp Cloud API y guarda información en MongoDB.
 El catálogo anterior deja de ser el flujo activo; sus colecciones no se borran ni modifican.
@@ -61,9 +61,31 @@ El archivo de audio tiene un límite de 20 MB tanto antes como después de conve
 
 ## Pruebas y límites
 
+### Trazabilidad y prevención de respuestas repetidas
+
+Los logs incluyen eventos JSON `webhook.received`, `message.processing`,
+`message.saved`, `whatsapp.request`, `whatsapp.response`, `response.sent`,
+`message.duplicate`, `response.skipped` y `webhook.response`.
+Filtra por `trace_id` para seguir una petición y por `message_id` para relacionar
+sus reintentos. Las notificaciones de estado de Meta aparecen en el JSON de
+entrada y no generan respuestas. Las respuestas HTTP de Meta incluyen su estado
+y JSON; los fallos de procesamiento incluyen el tipo de excepción.
+
+`LOG_JSON_PAYLOADS=true` (valor predeterminado) muestra cuerpos completos:
+teléfonos, textos, ubicaciones y transcripciones pueden aparecer en logs.
+Con `false` se mantienen eventos e identificadores sin los cuerpos.
+No se registran cabeceras Authorization, firmas ni archivos de audio.
+
+Cada respuesta se reserva atómicamente en MongoDB antes de enviarla. Los estados
+`sending`, `sent` y `unknown` impiden nuevos intentos automáticos para el mismo
+mensaje, incluso tras reinicios. Si hay un timeout o un fallo tras reservar,
+puede faltar la respuesta: revisar esos registros manualmente antes de reenviar.
+`acknowledged` indica aceptación de la solicitud de envío, no entrega al teléfono.
+Esto reemplaza el comportamiento anterior de reintentar confirmaciones pendientes.
+
     python -m unittest discover -s tests -v
 
-Las pruebas unitarias usan dobles de MongoDB, Meta y la API de transcripción: no envían mensajes reales ni consumen saldo. El webhook procesa todos los mensajes de cada evento en un hilo de trabajo, pero espera la transcripción antes de responder. Se procesa un audio a la vez por proceso para limitar el uso de memoria. Para alto volumen se necesita una cola persistente con workers; entregas simultáneas del mismo audio todavía pueden repetir el trabajo de transcripción aunque el registro final sea único. Una confirmación puede repetirse si el proceso se corta justo después de enviarla.
+Las pruebas unitarias usan dobles de MongoDB, Meta y la API de transcripción: no envían mensajes reales ni consumen saldo. El webhook procesa todos los mensajes de cada evento en un hilo de trabajo, pero espera la transcripción antes de responder. Se procesa un audio a la vez por proceso para limitar el uso de memoria. Para alto volumen se necesita una cola persistente con workers; entregas simultáneas del mismo audio todavía pueden repetir el trabajo de transcripción aunque el registro final sea único. Una confirmación pendiente o incierta ya no se reenvía automáticamente; requiere revisión manual.
 
 No ejecutes app.scripts.seed_catalog para este flujo: es una herramienta antigua que borra y reemplaza el catálogo.
 

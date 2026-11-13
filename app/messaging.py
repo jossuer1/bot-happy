@@ -3,6 +3,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
+from app.tracing import event
 
 
 class AudioInputError(ValueError):
@@ -25,14 +26,21 @@ def send_payload(to_number: str, content: dict):
     phone_id = os.getenv("WHATSAPP_PHONE_NUMBER_ID")
     if not phone_id:
         raise RuntimeError("Falta WHATSAPP_PHONE_NUMBER_ID")
+    payload = {"messaging_product": "whatsapp", "recipient_type": "individual", "to": to_number, **content}
+    event("whatsapp.request", payload=payload, method="POST", endpoint="/messages")
     response = requests.post(
         f"{graph_base()}/{phone_id}/messages",
         headers=auth_headers(),
-        json={"messaging_product": "whatsapp", "recipient_type": "individual", "to": to_number, **content},
+        json=payload,
         timeout=(10, 30),
     )
+    try:
+        result = response.json()
+    except ValueError:
+        result = {"non_json_response": True}
+    event("whatsapp.response", payload=result, http_status=response.status_code)
     response.raise_for_status()
-    return response.json()
+    return result
 
 
 def send_text(to_number: str, message_text: str):

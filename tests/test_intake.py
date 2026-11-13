@@ -14,6 +14,14 @@ class MemoryCollection:
     def find_one(self, query):
         return deepcopy(self.documents.get(query["_id"]))
 
+    def find_one_and_update(self, query, update):
+        document = self.documents.get(query["_id"])
+        if document is None or document.get("acknowledged") or "response_state" in document:
+            return None
+        previous = deepcopy(document)
+        document.update(update["$set"])
+        return previous
+
     def update_one(self, query, update, upsert=False):
         key = query["_id"]
         if key not in self.documents and upsert:
@@ -67,7 +75,7 @@ class IntakeTests(unittest.TestCase):
         self.assertNotIn("audio", saved)
         self.assertNotIn("media_id", saved)
 
-    def test_failed_confirmation_retries_without_transcribing_again(self):
+    def test_uncertain_confirmation_is_not_resent_on_late_retry(self):
         message = self.message("audio", audio={"id": "1234"})
         self.send.side_effect = RuntimeError("Meta no disponible")
         with self.assertRaises(RuntimeError):
@@ -76,7 +84,17 @@ class IntakeTests(unittest.TestCase):
         self.send.side_effect = None
         intake.process_message(message)
         self.transcribe.assert_called_once()
-        self.assertTrue(self.db.documents["wamid.test"]["acknowledged"])
+        self.assertFalse(self.db.documents["wamid.test"]["acknowledged"])
+        self.assertEqual(self.db.documents["wamid.test"]["response_state"], "unknown")
+        self.send.assert_called_once()
+
+    def test_concurrent_delivery_cannot_send_a_second_response(self):
+        record = {"_id": "pending", "reply": "ok", "acknowledged": False}
+        self.db.documents["pending"] = deepcopy(record)
+        self.send.side_effect = lambda *args: intake.deliver_response("593000000000", record)
+        intake.deliver_response("593000000000", record)
+        self.send.assert_called_once()
+        self.assertEqual(self.db.documents["pending"]["response_state"], "sent")
 
     def test_transcription_network_failure_does_not_record_success(self):
         self.transcribe.side_effect = RuntimeError("Modelo local no disponible")

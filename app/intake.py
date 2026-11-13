@@ -4,6 +4,7 @@ import math
 from app.db import submissions_collection
 from app.messaging import AudioInputError, request_location, send_text
 from app.transcription import transcribe_audio
+from app.tracing import event
 
 
 def location_fields(location):
@@ -33,6 +34,7 @@ def process_message(message):
 
     previous = submissions_collection.find_one({"_id": message_id})
     if previous:
+        event("message.duplicate", acknowledged=previous.get("acknowledged"), response_state=previous.get("response_state"))
         # Un reintento no vuelve a transcribir ni a guardar la ubicación.
         if not previous.get("acknowledged"):
             deliver_response(sender, previous)
@@ -68,12 +70,28 @@ def process_message(message):
 
     # El _id de WhatsApp impide duplicar registros si Meta reenvía un evento.
     submissions_collection.update_one({"_id": message_id}, {"$setOnInsert": record}, upsert=True)
+    event("message.saved", payload=record)
     deliver_response(sender, submissions_collection.find_one({"_id": message_id}))
 
 
 def deliver_response(sender, record):
-    if record.get("request_location"):
-        request_location(sender)
-    else:
-        send_text(sender, record["reply"])
-    submissions_collection.update_one({"_id": record["_id"]}, {"$set": {"acknowledged": True}})
+    # Reserva persistente y atómica, compartida por todos los workers/reinicios.
+    # Un timeout puede ocurrir DESPUÉS de que Meta haya aceptado el mensaje.
+    claimed = submissions_collection.find_one_and_update(
+        {"_id": record["_id"], "acknowledged": {"$ne": True}, "response_state": {"$exists": False}},
+        {"$set": {"response_state": "sending", "response_attempted_at": datetime.now(timezone.utc)}},
+    )
+    if claimed is None:
+        event("response.skipped", reason="already_attempted", source_message_id=record["_id"])
+        return
+    try:
+        if record.get("request_location"):
+            request_location(sender)
+        else:
+            send_text(sender, record["reply"])
+    except Exception as error:
+        submissions_collection.update_one({"_id": record["_id"]}, {"$set": {"response_state": "unknown"}})
+        event("response.unknown", error_type=type(error).__name__)
+        raise
+    submissions_collection.update_one({"_id": record["_id"]}, {"$set": {"acknowledged": True, "response_state": "sent"}})
+    event("response.sent", source_message_id=record["_id"])
