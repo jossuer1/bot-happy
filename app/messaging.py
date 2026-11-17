@@ -5,7 +5,6 @@ from urllib.parse import urlparse
 import requests
 from app.tracing import event
 
-
 class AudioInputError(ValueError):
     """Audio que el usuario debe volver a enviar corregido."""
 
@@ -56,6 +55,51 @@ def request_location(to_number: str):
             "action": {"name": "send_location"},
         },
     })
+
+
+def send_buttons(to_number: str, body: str, buttons: list):
+    """Hasta 3 botones de respuesta. buttons = [(id, título), ...]."""
+    return send_payload(to_number, {"type": "interactive", "interactive": {
+        "type": "button", "body": {"text": body},
+        "action": {"buttons": [{"type": "reply", "reply": {"id": i, "title": t}} for i, t in buttons]},
+    }})
+
+
+def send_list(to_number: str, body: str, button_text: str, sections: list):
+    """Menú desplegable. sections = [{"title": ..., "rows": [{"id", "title", "description"?}]}]."""
+    return send_payload(to_number, {"type": "interactive", "interactive": {
+        "type": "list", "body": {"text": body},
+        "action": {"button": button_text, "sections": sections},
+    }})
+
+
+def send_link_button(to_number: str, body: str, label: str, url: str):
+    """Un botón que abre un enlace. Al tocarlo NO llega ningún evento al webhook."""
+    return send_payload(to_number, {"type": "interactive", "interactive": {
+        "type": "cta_url", "body": {"text": body},
+        "action": {"name": "cta_url", "parameters": {"display_text": label, "url": url}},
+    }})
+
+
+def send_location(to_number: str, latitude: float, longitude: float, name: str, address: str):
+    return send_payload(to_number, {"type": "location", "location": {
+        "latitude": latitude, "longitude": longitude, "name": name, "address": address}})
+
+
+def send_media(to_number: str, kind: str, link: str, caption: str = None):
+    """kind: image, video, audio o document. audio no admite caption."""
+    media = {"link": link}
+    if caption and kind != "audio":
+        media["caption"] = caption
+    return send_payload(to_number, {"type": kind, kind: media})
+
+
+def send_template(to_number: str, name: str, params: list, language: str = "es"):
+    """Plantilla aprobada por Meta; única forma de escribir fuera de la ventana de 24 h."""
+    return send_payload(to_number, {"type": "template", "template": {
+        "name": name, "language": {"code": language},
+        "components": [{"type": "body", "parameters": [{"type": "text", "text": p} for p in params]}],
+    }})
 
 
 def download_audio(media_id: str, destination: Path, max_bytes: int):

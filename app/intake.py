@@ -2,7 +2,8 @@
 import math
 
 from app.db import submissions_collection
-from app.messaging import AudioInputError, request_location, send_text
+from app.messaging import AudioInputError, request_location, send_text, send_payload
+from app import workflow
 from app.transcription import transcribe_audio
 from app.tracing import event
 
@@ -55,18 +56,31 @@ def process_message(message):
         except ValueError:
             record["reply"] = "No pude leer esa ubicación. Compártela nuevamente desde Adjuntar > Ubicación."
         else:
-            record["reply"] = "Ubicación guardada. Ahora puedes enviar una nota de voz para guardar lo que digas como texto."
+            record["reply"] = "Ubicación guardada: " + record["location"]["maps_url"] + "\nPaso 2: envía una nota de voz. Te devolveré la transcripción."
     elif kind == "audio":
         try:
             record["transcription"] = transcribe_audio(message["audio"]["id"])
         except AudioInputError as error:
             record["reply"] = str(error)
         else:
-            record["reply"] = "Transcripción guardada. El archivo de audio no se conserva en este servidor."
-    elif kind in {"image", "video"}:
-        record["reply"] = "El guardado de fotos y videos todavía no está habilitado. Por ahora puedes compartir tu ubicación o una nota de voz."
+            record["reply"] = "Transcripción guardada:\n" + record["transcription"][:3500] + "\nPaso 3: envía una foto. El archivo de audio no se conserva en este servidor."
+    elif kind in {"image", "video", "document"}:
+        media = message.get(kind, {})
+        media_id = media.get("id", "")
+        if not isinstance(media_id, str) or not media_id.isdigit():
+            record["reply"] = "No pude leer el archivo. Vuelve a adjuntarlo o escribe menú."
+        else:
+            record["media"] = {key: media[key] for key in ("id", "mime_type", "sha256", "filename", "caption") if key in media}
+            next_step = {"image": "Paso 4: envía un video.", "video": "Paso 5: envía un documento PDF.",
+                         "document": "Paso 6: escribe enlace para probar un botón con URL."}[kind]
+            outgoing = {"id": media_id, "caption": "Archivo recibido y devuelto por el bot. " + next_step}
+            if kind == "document" and media.get("filename"):
+                outgoing["filename"] = media["filename"]
+            record["response_payload"] = {"type": kind, kind: outgoing}
     else:
-        record["request_location"] = True
+        choice = workflow.selection(message)
+        record["selection"] = choice[:256]
+        record["response_payload"] = workflow.route(choice, sender, submissions_collection)
 
     # El _id de WhatsApp impide duplicar registros si Meta reenvía un evento.
     submissions_collection.update_one({"_id": message_id}, {"$setOnInsert": record}, upsert=True)
@@ -85,13 +99,18 @@ def deliver_response(sender, record):
         event("response.skipped", reason="already_attempted", source_message_id=record["_id"])
         return
     try:
-        if record.get("request_location"):
-            request_location(sender)
+        if record.get("response_payload"):
+            result = send_payload(sender, record["response_payload"])
+        elif record.get("request_location"):
+            result = request_location(sender)
         else:
-            send_text(sender, record["reply"])
+            result = send_text(sender, record["reply"])
     except Exception as error:
         submissions_collection.update_one({"_id": record["_id"]}, {"$set": {"response_state": "unknown"}})
         event("response.unknown", error_type=type(error).__name__)
         raise
-    submissions_collection.update_one({"_id": record["_id"]}, {"$set": {"acknowledged": True, "response_state": "sent"}})
+    fields = {"acknowledged": True, "response_state": "sent"}
+    if isinstance(result, dict):
+        fields["whatsapp_response"] = result
+    submissions_collection.update_one({"_id": record["_id"]}, {"$set": fields})
     event("response.sent", source_message_id=record["_id"])

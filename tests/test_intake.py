@@ -38,17 +38,18 @@ class IntakeTests(unittest.TestCase):
             patch.object(intake, "send_text"),
             patch.object(intake, "request_location"),
             patch.object(intake, "transcribe_audio", return_value="Necesito ayuda en esta dirección."),
+            patch.object(intake, "send_payload"),
         ]
-        _, self.send, self.request_location, self.transcribe = [p.start() for p in self.patches]
+        _, self.send, self.request_location, self.transcribe, self.payload = [p.start() for p in self.patches]
         for p in self.patches:
             self.addCleanup(p.stop)
 
     def message(self, kind, **fields):
         return {"id": "wamid.test", "from": "593000000000", "timestamp": "123", "type": kind, **fields}
 
-    def test_text_requests_location_without_storing_text(self):
+    def test_text_opens_real_menu_without_storing_text_body(self):
         intake.process_message(self.message("text", text={"body": "hola"}))
-        self.request_location.assert_called_once_with("593000000000")
+        self.assertEqual(self.payload.call_args.args[1]["interactive"]["type"], "button")
         self.assertNotIn("text", self.db.documents["wamid.test"])
 
     def test_location_saved_with_sender_and_coordinates(self):
@@ -109,11 +110,13 @@ class IntakeTests(unittest.TestCase):
         self.assertNotIn("transcription", self.db.documents["wamid.test"])
         self.send.assert_called_once_with("593000000000", "Envía otra nota de voz.")
 
-    def test_images_and_videos_are_not_downloaded_or_saved(self):
-        for kind in ["image", "video"]:
+    def test_media_metadata_is_saved_and_real_media_id_is_returned(self):
+        for kind in ["image", "video", "document"]:
             with self.subTest(kind=kind):
                 intake.process_message({**self.message(kind), "id": kind, kind: {"id": "1234"}})
                 self.assertNotIn(kind, self.db.documents[kind])
+                self.assertEqual(self.db.documents[kind]["media"]["id"], "1234")
+                self.assertEqual(self.payload.call_args.args[1][kind]["id"], "1234")
         self.transcribe.assert_not_called()
 
 
